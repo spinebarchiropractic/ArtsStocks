@@ -1,3 +1,4 @@
+// v3 - fixed totals
 import { useState, useEffect, useRef } from "react";
 
 const PORTFOLIO = [
@@ -98,8 +99,9 @@ export default function App() {
   const totalGL       = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.gl:0);},0);
   const harvestable   = PORTFOLIO.filter(p=>p.phase<=3).reduce((a,p)=>{
     const g=gl(p);
-    if(p.dead) return a+p.costBasis*p.qty;
-    if(g&&g.gl<0) return a+Math.abs(g.gl);
+    if(p.dead) return a+p.costBasis*p.qty;           // full write-off
+    if(g&&g.gl<0) return a+Math.abs(g.gl);           // live loss
+    if(!g&&p.costBasis>0) return a+p.costBasis*p.qty; // OTC: use cost as est. loss
     return a;
   },0);
   const winners = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl>0;}).sort((a,b)=>(gl(b)?.gl||0)-(gl(a)?.gl||0));
