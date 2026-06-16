@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 
-const REFRESH_INTERVAL = 60;
-
 const PORTFOLIO = [
   { symbol:"MMATQ", name:"Meta Materials",           qty:1,       costBasis:396.28, phase:1, dead:true  },
   { symbol:"VEVMQ", name:"Vicinity Motor",            qty:33,      costBasis:6.99,   phase:1, dead:true  },
@@ -40,302 +38,423 @@ const PORTFOLIO = [
   { symbol:"CYCU",  name:"Cycurion Inc",              qty:34,      costBasis:0.88,   phase:0, dead:false },
 ];
 
-// Default verdicts based on phase — overridden by AI analysis if run
-const DEFAULT_VERDICT = { 0:"SPECULATIVE", 1:"WRITE OFF", 2:"SELL", 3:"SELL", 4:"TRIM", 5:"HOLD" };
-const VERDICT_COLOR   = { "HOLD":"#22c55e", "TRIM":"#f59e0b", "SELL":"#ef4444", "WRITE OFF":"#6b7280", "SPECULATIVE":"#a855f7", "WRITE-OFF":"#6b7280" };
-const PHASE_LABELS    = { 0:"Speculative", 1:"Write Off", 2:"Sell Now", 3:"Harvest Loss", 4:"Trim", 5:"Hold" };
-
 const MANUAL_ONLY = new Set(["SEEK","SSTY","BTCWF","WAGP","SESEN","BAIYU","MMATQ","VEVMQ","CARM","CYCU","MBIO","BDRBF","OSS","DRUG","STI","KORE","SPCB","UP"]);
 
-const usd  = (n, dec=2) => n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:dec,maximumFractionDigits:dec});
-const pct  = (n) => n == null ? "—" : (n>=0?"+":"-") + Math.abs(n).toFixed(1) + "%";
-const sgn  = (n) => n >= 0 ? "+" : "-";
+const PHASE = {
+  0:{ action:"SPECULATIVE", color:"#a855f7", border:"#3b1a5a", why:"Small bet. Hard stop at -20%. Take profits at target." },
+  1:{ action:"WRITE OFF",   color:"#6b7280", border:"#1f2937", why:"Bankrupt. Contact Schwab to declare worthless — full tax loss." },
+  2:{ action:"SELL NOW",    color:"#ef4444", border:"#450a0a", why:"Near-zero value. Sell immediately to capture any remaining tax loss." },
+  3:{ action:"HARVEST",     color:"#f97316", border:"#431407", why:"Sell to harvest the loss. Directly offsets gains from your winners." },
+  4:{ action:"TRIM",        color:"#f59e0b", border:"#422006", why:"Lock in gains gradually. Use harvested losses to cover the tax bill." },
+  5:{ action:"HOLD",        color:"#22c55e", border:"#052e16", why:"Core position. Let it run. Revisit sizing after cleanup is done." },
+};
+
+const fmt  = (n,d=2) => "$"+Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn  = n => n>=0?"+":"-";
+const pct  = n => (n>=0?"+":"")+n.toFixed(1)+"%";
 
 export default function App() {
-  const [prices, setPrices]             = useState({});
-  const [manualPrices, setManualPrices] = useState({});
-  const [analysis, setAnalysis]         = useState({});
-  const [aLoading, setALoading]         = useState({});
-  const [portAnalysis, setPortAnalysis] = useState(null);
-  const [portLoading, setPortLoading]   = useState(false);
-  const [fetching, setFetching]         = useState(false);
-  const [lastUpdated, setLastUpdated]   = useState(null);
-  const [countdown, setCountdown]       = useState(REFRESH_INTERVAL);
-  const [filter, setFilter]             = useState("all");
-  const [editingPrice, setEditingPrice] = useState(null);
-  const [editVal, setEditVal]           = useState("");
-  const [expandedAnalysis, setExpandedAnalysis] = useState(null);
-  const pricesRef = useRef({});
+  const [prices, setPrices]           = useState({});
+  const [fetching, setFetching]       = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [countdown, setCountdown]     = useState(60);
+  const [tab, setTab]                 = useState("strategy");
+  const [brief, setBrief]             = useState(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [posInsight, setPosInsight]   = useState({});
+  const [posLoading, setPosLoading]   = useState({});
+  const [open, setOpen]               = useState(null);
+  const ref = useRef({});
 
-  const getPrice = sym => manualPrices[sym] ?? pricesRef.current[sym] ?? null;
-  const getGL = pos => {
-    if (pos.dead) return null;
-    const p = getPrice(pos.symbol);
-    if (p == null) return null;
-    const cv = p * pos.qty, cb = pos.costBasis * pos.qty;
-    return { price:p, gl:cv-cb, pct:((p-pos.costBasis)/pos.costBasis)*100, currentValue:cv, costValue:cb };
+  const price = sym => ref.current[sym] ?? null;
+  const gl = pos => {
+    if(pos.dead) return null;
+    const p = price(pos.symbol);
+    if(!p) return null;
+    const cv=p*pos.qty, cb=pos.costBasis*pos.qty;
+    return {p, gl:cv-cb, pct:((p-pos.costBasis)/pos.costBasis)*100, cv, cb};
   };
 
   const doFetch = async () => {
     setFetching(true);
-    const targets = PORTFOLIO.filter(p => !p.dead && !MANUAL_ONLY.has(p.symbol)).map(p => p.symbol);
-    const newPrices = {};
-    await Promise.allSettled(targets.map(async sym => {
-      try {
-        const r = await fetch(`/api/quote?symbol=${sym}`);
-        const d = await r.json();
-        if (d.price && d.price > 0) newPrices[sym] = d.price;
-      } catch {}
+    const syms = PORTFOLIO.filter(p=>!p.dead&&!MANUAL_ONLY.has(p.symbol)).map(p=>p.symbol);
+    const fresh={};
+    await Promise.allSettled(syms.map(async s=>{
+      try{ const r=await fetch(`/api/quote?symbol=${s}`); const d=await r.json(); if(d.price>0) fresh[s]=d.price; }catch{}
     }));
-    pricesRef.current = { ...pricesRef.current, ...newPrices };
-    setPrices({ ...pricesRef.current });
+    ref.current={...ref.current,...fresh};
+    setPrices({...ref.current});
     setLastUpdated(new Date().toLocaleTimeString());
-    setCountdown(REFRESH_INTERVAL);
+    setCountdown(60);
     setFetching(false);
   };
 
-  useEffect(() => { doFetch(); const iv = setInterval(doFetch, REFRESH_INTERVAL*1000); return ()=>clearInterval(iv); }, []);
-  useEffect(() => { const t = setInterval(()=>setCountdown(c=>c>0?c-1:0),1000); return ()=>clearInterval(t); }, []);
+  useEffect(()=>{ doFetch(); const iv=setInterval(doFetch,60000); return()=>clearInterval(iv); },[]);
+  useEffect(()=>{ const t=setInterval(()=>setCountdown(c=>c>0?c-1:0),1000); return()=>clearInterval(t); },[]);
 
-  const analyzePosition = async pos => {
-    setALoading(p=>({...p,[pos.symbol]:true}));
-    const gl = getGL(pos);
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:800,
-          tools:[{type:"web_search_20250305",name:"web_search"}],
-          messages:[{role:"user",content:
-            `Analyze ${pos.symbol} (${pos.name}) for a taxable Schwab account doing a 35→15 position cleanup.
-Cost: $${pos.costBasis}/sh | Qty: ${pos.qty} | Price: $${gl?.price??"unknown"} | G/L: ${gl?`${sgn(gl.gl)}$${Math.abs(gl.gl).toFixed(0)} (${gl.pct.toFixed(1)}%)`:"N/A"} | Action: ${PHASE_LABELS[pos.phase]}
-Search latest news and analyst targets. Return ONLY raw JSON:
-{"verdict":"SELL","confidence":80,"priceTarget":null,"reasoning":"2 sentences max","taxNote":"wash sale or tax note"}`
-          }]
-        })
-      });
-      const data = await res.json();
-      const txt = data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-      const m = txt.match(/\{[\s\S]*?"reasoning"[\s\S]*?\}/);
-      if (m) { try { setAnalysis(p=>({...p,[pos.symbol]:JSON.parse(m[0])})); setExpandedAnalysis(pos.symbol); } catch(_){} }
-    } catch(e){ console.error(e); }
-    setALoading(p=>({...p,[pos.symbol]:false}));
-  };
+  // ── TOTALS ──────────────────────────────────────────────────────────────
+  const totalValue    = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.cv:0);},0);
+  const totalGL       = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.gl:0);},0);
+  const harvestable   = PORTFOLIO.filter(p=>p.phase<=3).reduce((a,p)=>{
+    const g=gl(p);
+    if(p.dead) return a+p.costBasis*p.qty;
+    if(g&&g.gl<0) return a+Math.abs(g.gl);
+    return a;
+  },0);
+  const winners = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl>0;}).sort((a,b)=>(gl(b)?.gl||0)-(gl(a)?.gl||0));
+  const bigWin  = winners[0]; const bigWinGL = bigWin?gl(bigWin):null;
 
-  const runPortfolioAnalysis = async () => {
-    setPortLoading(true);
-    const summary = PORTFOLIO.map(p => {
-      const g = getGL(p);
-      return `${p.symbol} action=${PHASE_LABELS[p.phase]} cost=$${p.costBasis} gl=${g?`${sgn(g.gl)}$${Math.abs(g.gl).toFixed(0)}`:"dead"}`;
+  // ── STRATEGY BRIEF ──────────────────────────────────────────────────────
+  const runBrief = async () => {
+    setBriefLoading(true);
+    const lines = PORTFOLIO.map(p=>{
+      const g=gl(p);
+      const loss = p.dead ? p.costBasis*p.qty : (g&&g.gl<0 ? Math.abs(g.gl) : 0);
+      return `${p.symbol} (${PHASE[p.phase].action}) cost=$${p.costBasis} qty=${p.qty}${g?` now=$${g.p.toFixed(2)} gl=${sgn(g.gl)}${fmt(Math.abs(g.gl),0)} ${pct(g.pct)}`:p.dead?` WORTHLESS loss=${fmt(loss,0)}`:` no-price loss-est=${fmt(loss,0)}`}`;
     }).join("\n");
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:800,
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-6",max_tokens:1400,
           tools:[{type:"web_search_20250305",name:"web_search"}],
           messages:[{role:"user",content:
-            `Taxable Schwab account, cleanup 35→15 positions, June 2026. Search market conditions. Give 3 sentence brief on what to do THIS WEEK. Be direct. End with the single most important action.\n\n${summary}`
+`You are a ruthless tax-aware portfolio strategist. Taxable Schwab account, June 2026, consolidating 35→15 positions.
+
+Search current market conditions then produce a strategy brief. Use EXACTLY these section headers (with the dashes):
+
+--- THIS WEEK: TOP 3 ACTIONS ---
+Number them. Be specific (use ticker symbols and dollar amounts). Most urgent first.
+
+--- TAX OPPORTUNITY ---
+Total harvestable losses, which specific positions to sell first and why, which gains they offset, wash sale warnings.
+
+--- PROTECT YOUR WINNERS ---
+RGTI, BDRBF, OSS, DRUG, USO are large winners. How to lock in gains tax-efficiently using losses as offsets.
+
+--- BOTTOM LINE ---
+One sentence. The single most important move today.
+
+Portfolio:
+${lines}`
           }]
         })
       });
-      const data = await res.json();
-      setPortAnalysis(data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"");
-    } catch(e){ console.error(e); }
-    setPortLoading(false);
+      const data=await res.json();
+      setBrief(data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"");
+    }catch(e){console.error(e);}
+    setBriefLoading(false);
   };
 
-  const SNAP = {BDRBF:216.00,AAPL:1540.86,MSFT:1240.20,VZ:1252.85,VICI:562.81,SCHD:851.57,USO:799.27,RGTI:530.38,SOFI:441.00,NEM:385.14,NVDA:418.77,OSS:993.00,DRUG:291.25,JETS:313.21,CCL:306.75,CRON:129.75,KORE:137.78,SPCB:121.90,B:429.75,S:225.70,ACHR:108.70,STI:40.95,LCID:5.05,UP:8.00,CYCU:23.97,MBIO:3.49,BTCWF:12.51};
-  const totalValue = PORTFOLIO.reduce((a,p)=>{const g=getGL(p);return a+(g?g.currentValue:(SNAP[p.symbol]||0));},0);
-  const totalGL    = PORTFOLIO.reduce((a,p)=>{const g=getGL(p);return a+(g?g.gl:0);},0);
-  const liveCount  = Object.keys(pricesRef.current).length;
+  // ── PER-POSITION INSIGHT ─────────────────────────────────────────────────
+  const analyze = async (pos) => {
+    setPosLoading(p=>({...p,[pos.symbol]:true}));
+    const g=gl(pos);
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-6",max_tokens:500,
+          tools:[{type:"web_search_20250305",name:"web_search"}],
+          messages:[{role:"user",content:
+`Taxable Schwab account. Position: ${pos.symbol} (${pos.name})
+${pos.qty} shares @ $${pos.costBasis} cost | ${g?`Now $${g.p.toFixed(2)} | P&L ${sgn(g.gl)}${fmt(Math.abs(g.gl),0)} (${pct(g.pct)})`:pos.dead?"WORTHLESS":"no live price"} | Recommended: ${PHASE[pos.phase].action}
 
-  const groups = [
-    { label:"🔴 Sell / Write Off", phases:[1,2,3], color:"#ef4444" },
-    { label:"🟡 Trim", phases:[4], color:"#f59e0b" },
-    { label:"🟢 Hold", phases:[5], color:"#22c55e" },
-    { label:"⚡ Speculative", phases:[0], color:"#a855f7" },
+Search latest news + analyst price targets. Return ONLY raw JSON, no markdown:
+{"why":"why take this action now — 2 sentences","taxMove":"exact tax strategy for this position","risk":"what happens if you DON'T act","target":null,"confidence":85}`
+          }]
+        })
+      });
+      const data=await res.json();
+      const txt=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
+      const m=txt.match(/\{[\s\S]*?"confidence"[\s\S]*?\}/);
+      if(m){try{setPosInsight(p=>({...p,[pos.symbol]:JSON.parse(m[0])}));}catch(_){}}
+    }catch(e){console.error(e);}
+    setPosLoading(p=>({...p,[pos.symbol]:false}));
+  };
+
+  // ── RENDER HELPERS ───────────────────────────────────────────────────────
+  const ph = p => PHASE[p.phase];
+
+  const ActionCard = ({pos}) => {
+    const g=gl(pos), info=ph(pos), ins=posInsight[pos.symbol], isOpen=open===pos.symbol;
+    const loss = pos.dead ? pos.costBasis*pos.qty : (g&&g.gl<0 ? Math.abs(g.gl):0);
+    return (
+      <div style={{border:`1px solid ${info.border}`,borderRadius:10,marginBottom:8,overflow:"hidden",background:"#0a0f1e"}}>
+        {/* Header row */}
+        <div onClick={()=>setOpen(isOpen?null:pos.symbol)}
+          style={{padding:"12px 14px",cursor:"pointer",display:"grid",gridTemplateColumns:"80px 1fr auto",gap:10,alignItems:"center"}}>
+          {/* Action badge */}
+          <div style={{background:info.color+"18",border:`1px solid ${info.color}44`,borderRadius:6,padding:"5px 0",textAlign:"center"}}>
+            <div style={{fontSize:9,fontWeight:900,color:info.color,letterSpacing:0.5}}>{info.action}</div>
+          </div>
+          {/* Ticker + name */}
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+              <span style={{fontSize:15,fontWeight:900,color:"#f8fafc"}}>{pos.symbol}</span>
+              <span style={{fontSize:10,color:"#475569",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{pos.name}</span>
+            </div>
+            <div style={{fontSize:10,color:"#334155",marginTop:2}}>
+              {pos.dead
+                ? <span style={{color:"#6b7280"}}>Tax loss: {fmt(loss,0)}</span>
+                : g
+                  ? <span style={{color:g.gl>=0?"#22c55e":"#f97316"}}>{sgn(g.gl)}{fmt(Math.abs(g.gl),0)} ({pct(g.pct)}) · {fmt(g.p)} now</span>
+                  : <span style={{color:"#475569"}}>Cost {fmt(pos.costBasis)}/sh · {pos.qty} shares</span>
+              }
+            </div>
+          </div>
+          {/* Chevron */}
+          <div style={{color:"#334155",fontSize:12}}>{isOpen?"▲":"▼"}</div>
+        </div>
+
+        {/* Expanded */}
+        {isOpen && (
+          <div style={{borderTop:`1px solid ${info.border}`,padding:"12px 14px",background:"#060a14"}}>
+            {/* Why this action */}
+            <div style={{background:info.color+"0d",border:`1px solid ${info.color}22`,borderRadius:7,padding:"10px 12px",marginBottom:10}}>
+              <div style={{fontSize:9,color:info.color,fontWeight:800,letterSpacing:1,marginBottom:4}}>WHY {info.action}</div>
+              <div style={{fontSize:12,color:"#cbd5e1",lineHeight:1.6}}>{info.why}</div>
+              {g && (
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginTop:10}}>
+                  {[
+                    {label:"Paid",    val:fmt(g.cb,0)},
+                    {label:"Now Worth",val:fmt(g.cv,0)},
+                    {label:"P&L",     val:`${sgn(g.gl)}${fmt(Math.abs(g.gl),0)}`, color:g.gl>=0?"#22c55e":"#f97316"},
+                  ].map(s=>(
+                    <div key={s.label} style={{background:"#0f172a",borderRadius:6,padding:"7px 9px",textAlign:"center"}}>
+                      <div style={{fontSize:8,color:"#475569",marginBottom:2}}>{s.label}</div>
+                      <div style={{fontSize:13,fontWeight:800,color:s.color||"#f8fafc"}}>{s.val}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {pos.dead && (
+                <div style={{marginTop:10,background:"#0f172a",borderRadius:6,padding:"8px 10px",fontSize:11,color:"#6b7280"}}>
+                  Action: Message Schwab via secure message center requesting worthless security write-off. Estimated loss: <span style={{color:"#f8fafc",fontWeight:700}}>{fmt(loss,0)}</span>
+                </div>
+              )}
+              {!pos.dead && !g && (
+                <div style={{marginTop:8,fontSize:11,color:"#475569"}}>Live price unavailable for this OTC/micro-cap security. Check Schwab for current price.</div>
+              )}
+            </div>
+
+            {/* AI insight */}
+            {ins ? (
+              <div style={{background:"#0f172a",borderRadius:7,padding:"10px 12px",border:"1px solid #1e293b"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{fontSize:9,color:"#64748b",fontWeight:800,letterSpacing:1}}>AI ANALYSIS</span>
+                  <span style={{fontSize:10,color:info.color,fontWeight:700}}>{ins.confidence}% confidence</span>
+                </div>
+                <div style={{fontSize:12,color:"#cbd5e1",lineHeight:1.6,marginBottom:8}}>{ins.why}</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+                  <div style={{background:"#060a14",borderRadius:6,padding:"7px 9px"}}>
+                    <div style={{fontSize:8,color:"#065f46",marginBottom:3,letterSpacing:0.5}}>TAX MOVE</div>
+                    <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.4}}>{ins.taxMove}</div>
+                  </div>
+                  <div style={{background:"#060a14",borderRadius:6,padding:"7px 9px"}}>
+                    <div style={{fontSize:8,color:"#7f1d1d",marginBottom:3,letterSpacing:0.5}}>RISK OF INACTION</div>
+                    <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.4}}>{ins.risk}</div>
+                  </div>
+                </div>
+                <button onClick={(e)=>{e.stopPropagation();analyze(pos);}} disabled={posLoading[pos.symbol]}
+                  style={{width:"100%",marginTop:8,background:"#1e293b",color:"#475569",border:"none",borderRadius:6,padding:"6px",fontSize:10,cursor:"pointer"}}>
+                  {posLoading[pos.symbol]?"Refreshing…":"↻ Refresh AI analysis"}
+                </button>
+              </div>
+            ) : (
+              <button onClick={(e)=>{e.stopPropagation();analyze(pos);}} disabled={posLoading[pos.symbol]}
+                style={{width:"100%",background:posLoading[pos.symbol]?"#1e293b":`linear-gradient(90deg,${info.color}33,${info.color}11)`,border:`1px solid ${info.color}33`,color:posLoading[pos.symbol]?"#374151":info.color,borderRadius:7,padding:"10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                {posLoading[pos.symbol]?`Analyzing ${pos.symbol}…`:`⚡ Why ${info.action}? Get specific guidance`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const sections = [
+    {label:"🚨 Urgent", phases:[1,2],   desc:"Write off or sell immediately"},
+    {label:"📉 Harvest", phases:[3],    desc:"Sell to capture tax losses"},
+    {label:"✂️ Trim",   phases:[4],     desc:"Lock in gains tax-efficiently"},
+    {label:"✅ Hold",   phases:[5],     desc:"Core positions — hold and compound"},
+    {label:"⚡ Spec",   phases:[0],     desc:"Speculative — manage risk"},
   ];
 
-  const visiblePositions = filter === "all"
-    ? PORTFOLIO
-    : filter === "losers"  ? PORTFOLIO.filter(p=>{const g=getGL(p);return g&&g.gl<0;})
-    : filter === "winners" ? PORTFOLIO.filter(p=>{const g=getGL(p);return g&&g.gl>0;})
-    : PORTFOLIO;
-
-  const verdict = pos => {
-    const a = analysis[pos.symbol];
-    return a?.verdict || DEFAULT_VERDICT[pos.phase] || "HOLD";
-  };
-
   return (
-    <div style={{background:"#0a0f1e",minHeight:"100vh",color:"#e2e8f0",fontFamily:"'Inter',system-ui,sans-serif",maxWidth:540,margin:"0 auto",paddingBottom:40}}>
+    <div style={{background:"#060a14",minHeight:"100vh",color:"#e2e8f0",fontFamily:"'Inter',system-ui,sans-serif",maxWidth:540,margin:"0 auto",paddingBottom:48}}>
 
-      {/* HEADER */}
-      <div style={{background:"linear-gradient(160deg,#0f172a,#1a1040)",padding:"16px 16px 14px",borderBottom:"1px solid #1e293b",position:"sticky",top:0,zIndex:10}}>
+      {/* ── HEADER ── */}
+      <div style={{background:"linear-gradient(160deg,#0f172a,#1a1040)",padding:"16px 16px 12px",borderBottom:"1px solid #1e293b",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
           <div>
-            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Schwab · Taxable · Individual</div>
-            <div style={{fontSize:19,fontWeight:900,color:"#f8fafc",letterSpacing:-0.5}}>Portfolio Command</div>
+            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Schwab · Taxable · Cleanup Mode</div>
+            <div style={{fontSize:19,fontWeight:900,color:"#f8fafc",letterSpacing:-0.5}}>Portfolio Strategy</div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:10,color:fetching?"#f59e0b":"#34d399",marginBottom:3}}>{fetching?"● Updating...": `● Live · ${countdown}s`}</div>
+            <div style={{fontSize:9,color:fetching?"#f59e0b":"#22c55e",marginBottom:3}}>{fetching?"● Updating prices…":`● Live · ${countdown}s`}</div>
             <button onClick={doFetch} disabled={fetching}
-              style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:6,padding:"4px 12px",fontSize:11,cursor:"pointer"}}>
-              ↻ Refresh
-            </button>
+              style={{background:"#1e293b",color:"#64748b",border:"1px solid #334155",borderRadius:6,padding:"3px 10px",fontSize:10,cursor:"pointer"}}>↻</button>
           </div>
         </div>
 
-        {/* Stats */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:8}}>
+        {/* KPI strip */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
           {[
-            {label:"Total Value",    val:usd(totalValue,0),                                      color:"#f8fafc"},
-            {label:"Total P&L",      val:`${sgn(totalGL)}${usd(Math.abs(totalGL),0)}`,           color:totalGL>=0?"#22c55e":"#ef4444"},
-            {label:"Positions",      val:`${PORTFOLIO.length} → 15`,                             color:"#94a3b8"},
+            {label:"Portfolio Value", val:totalValue>0?fmt(totalValue,0):"Loading…", color:"#f8fafc"},
+            {label:"Harvestable Losses", val:`~${fmt(harvestable,0)}`, color:"#f97316", tip:"Tax losses available to offset gains"},
+            {label:"Positions",  val:`${PORTFOLIO.length} → 15`, color:"#94a3b8"},
           ].map(s=>(
             <div key={s.label} style={{background:"#0f172a",borderRadius:7,padding:"8px 10px",border:"1px solid #1e293b"}}>
-              <div style={{fontSize:9,color:"#475569",marginBottom:2,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+              <div style={{fontSize:8,color:"#475569",marginBottom:2,textTransform:"uppercase",letterSpacing:0.4}}>{s.label}</div>
               <div style={{fontSize:13,fontWeight:800,color:s.color}}>{s.val}</div>
             </div>
           ))}
         </div>
-        {lastUpdated&&<div style={{fontSize:9,color:"#334155"}}>Updated {lastUpdated} · {liveCount} live prices · manual entry available per position</div>}
+        {lastUpdated&&<div style={{fontSize:9,color:"#1e293b",marginTop:5}}>Prices updated {lastUpdated}</div>}
       </div>
 
-      {/* STRATEGY BRIEF */}
-      <div style={{padding:"12px 16px 0"}}>
-        <button onClick={runPortfolioAnalysis} disabled={portLoading}
-          style={{width:"100%",background:portLoading?"#1e293b":"linear-gradient(90deg,#6d28d9,#4338ca)",color:"#fff",border:"none",borderRadius:8,padding:"10px",fontSize:13,fontWeight:800,cursor:"pointer"}}>
-          {portLoading?"⟳ Analyzing...":"⚡ This Week's Strategy Brief"}
-        </button>
-        {portAnalysis&&(
-          <div style={{background:"#160f2e",border:"1px solid #4c1d95",borderRadius:8,padding:14,marginTop:8,fontSize:12,lineHeight:1.75,color:"#c4b5fd"}}>
-            <div style={{fontSize:9,color:"#7c3aed",fontWeight:800,letterSpacing:1,marginBottom:6}}>STRATEGY</div>
-            {portAnalysis}
-          </div>
-        )}
-      </div>
-
-      {/* FILTER */}
-      <div style={{padding:"10px 16px 0",display:"flex",gap:6}}>
-        {[["all","All"],["winners","🟢 Winners"],["losers","🔴 Losers"]].map(([v,l])=>(
-          <button key={v} onClick={()=>setFilter(v)}
-            style={{background:filter===v?"#1d4ed8":"#1e293b",color:filter===v?"#fff":"#64748b",border:"none",borderRadius:5,padding:"4px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>
-            {l}
+      {/* ── TABS ── */}
+      <div style={{display:"flex",borderBottom:"1px solid #1e293b",background:"#0a0f1e",position:"sticky",top:87,zIndex:9}}>
+        {[["strategy","🎯 Strategy"],["positions","📋 Positions"],["tax","💰 Tax Plan"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)}
+            style={{flex:1,padding:"10px 4px",background:tab===id?"#1e293b":"transparent",color:tab===id?"#f8fafc":"#475569",border:"none",borderBottom:tab===id?"2px solid #6d28d9":"2px solid transparent",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            {label}
           </button>
         ))}
       </div>
 
-      {/* POSITION GROUPS */}
-      {groups.map(group => {
-        const positions = visiblePositions.filter(p => group.phases.includes(p.phase));
-        if (positions.length === 0) return null;
-        return (
-          <div key={group.label} style={{padding:"14px 16px 0"}}>
-            <div style={{fontSize:11,fontWeight:800,color:group.color,letterSpacing:1,textTransform:"uppercase",marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
-              {group.label}
-              <div style={{flex:1,height:1,background:group.color+"33"}}/>
+      {/* ── STRATEGY TAB ── */}
+      {tab==="strategy" && (
+        <div style={{padding:"14px 16px 0"}}>
+          <button onClick={runBrief} disabled={briefLoading}
+            style={{width:"100%",background:briefLoading?"#1e293b":"linear-gradient(90deg,#6d28d9,#4338ca)",color:"#fff",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontWeight:900,cursor:"pointer",marginBottom:12,letterSpacing:0.3}}>
+            {briefLoading?"⟳ Building your strategy brief…":"⚡ Generate This Week's Strategy Brief"}
+          </button>
+
+          {/* Tax snapshot */}
+          <div style={{background:"#0f1a0a",border:"1px solid #14532d",borderRadius:9,padding:"12px 14px",marginBottom:12}}>
+            <div style={{fontSize:9,color:"#16a34a",fontWeight:800,letterSpacing:1,marginBottom:8}}>💰 TAX SNAPSHOT</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <div>
+                <div style={{fontSize:10,color:"#475569",marginBottom:2}}>Harvestable losses</div>
+                <div style={{fontSize:18,fontWeight:900,color:"#f97316"}}>{fmt(harvestable,0)}</div>
+                <div style={{fontSize:9,color:"#475569",marginTop:1}}>across {PORTFOLIO.filter(p=>p.phase<=3).length} positions</div>
+              </div>
+              <div>
+                <div style={{fontSize:10,color:"#475569",marginBottom:2}}>Biggest gain to protect</div>
+                {bigWin && bigWinGL ? (
+                  <>
+                    <div style={{fontSize:16,fontWeight:900,color:"#22c55e"}}>{bigWin.symbol} +{fmt(bigWinGL.gl,0)}</div>
+                    <div style={{fontSize:9,color:"#475569",marginTop:1}}>needs loss offsets before trimming</div>
+                  </>
+                ) : <div style={{fontSize:12,color:"#334155"}}>Loading…</div>}
+              </div>
             </div>
+            <div style={{marginTop:10,padding:"8px 10px",background:"#052e16",borderRadius:6,fontSize:11,color:"#4ade80",lineHeight:1.5}}>
+              Strategy: Sell losers first → use losses to offset gains → then trim winners tax-free. <span style={{color:"#86efac",fontWeight:700}}>Wash sale rule: wait 31 days before rebuying any sold position.</span>
+            </div>
+          </div>
 
-            {positions.map(pos => {
-              const gl      = getGL(pos);
-              const v       = verdict(pos);
-              const vColor  = VERDICT_COLOR[v] || "#94a3b8";
-              const a       = analysis[pos.symbol];
-              const showAI  = expandedAnalysis === pos.symbol;
-              const price   = getPrice(pos.symbol);
-              const hasMan  = manualPrices[pos.symbol] != null;
-              const noPrice = !pos.dead && price == null;
-
-              return (
-                <div key={pos.symbol} style={{background:"#0d1424",border:`1px solid #1a2540`,borderRadius:10,marginBottom:6,overflow:"hidden"}}>
-
-                  {/* MAIN ROW */}
-                  <div style={{padding:"12px 14px",display:"grid",gridTemplateColumns:"auto 1fr auto",gap:12,alignItems:"center"}}>
-
-                    {/* VERDICT badge */}
-                    <div style={{background:vColor+"22",border:`1px solid ${vColor}55`,borderRadius:6,padding:"4px 8px",textAlign:"center",minWidth:62}}>
-                      <div style={{fontSize:9,fontWeight:900,color:vColor,letterSpacing:0.5}}>{v}</div>
-                    </div>
-
-                    {/* Ticker + name + cost */}
-                    <div>
-                      <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-                        <span style={{fontSize:15,fontWeight:900,color:"#f8fafc"}}>{pos.symbol}</span>
-                        <span style={{fontSize:10,color:"#475569"}}>{pos.name}</span>
-                      </div>
-                      <div style={{fontSize:10,color:"#475569",marginTop:1}}>
-                        {pos.dead ? (
-                          <span style={{color:"#6b7280"}}>Cost: {usd(pos.costBasis)} × {pos.qty} · Worthless</span>
-                        ) : (
-                          <span>Cost {usd(pos.costBasis)}/sh · {pos.qty} shares · Paid {usd(pos.costBasis * pos.qty, 0)}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Price + P&L */}
-                    <div style={{textAlign:"right",minWidth:90}}>
-                      {pos.dead ? (
-                        <div style={{fontSize:11,color:"#4b5563",fontWeight:700}}>—</div>
-                      ) : gl ? (
-                        <>
-                          <div style={{fontSize:15,fontWeight:800,color:hasMan?"#f59e0b":"#f8fafc"}}>{usd(gl.price)}</div>
-                          <div style={{fontSize:11,fontWeight:700,color:gl.gl>=0?"#22c55e":"#ef4444"}}>
-                            {sgn(gl.gl)}{usd(Math.abs(gl.gl),0)} ({pct(gl.pct)})
-                          </div>
-                        </>
-                      ) : noPrice ? (
-                        <div>
-                          {editingPrice===pos.symbol ? (
-                            <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-                              <input value={editVal} onChange={e=>setEditVal(e.target.value)}
-                                onKeyDown={e=>{if(e.key==="Enter"){setManualPrices(p=>({...p,[pos.symbol]:parseFloat(editVal)}));setEditingPrice(null);}}}
-                                placeholder="price" autoFocus
-                                style={{width:64,background:"#1e293b",border:"1px solid #334155",borderRadius:5,padding:"4px 6px",color:"#f8fafc",fontSize:12,textAlign:"right"}}/>
-                              <button onClick={()=>{setManualPrices(p=>({...p,[pos.symbol]:parseFloat(editVal)}));setEditingPrice(null);}}
-                                style={{background:"#1d4ed8",color:"#fff",border:"none",borderRadius:5,padding:"4px 7px",fontSize:11,cursor:"pointer"}}>✓</button>
-                            </div>
-                          ) : (
-                            <button onClick={()=>{setEditingPrice(pos.symbol);setEditVal("");}}
-                              style={{background:"#1e293b",color:"#475569",border:"1px dashed #334155",borderRadius:5,padding:"3px 8px",fontSize:10,cursor:"pointer"}}>
-                              + price
-                            </button>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
+          {/* Brief output */}
+          {brief && (
+            <div style={{background:"#0f172a",border:"1px solid #312e81",borderRadius:9,padding:"14px",marginBottom:12,fontSize:12,color:"#c7d2fe",lineHeight:1.8,whiteSpace:"pre-wrap"}}>
+              {brief.split("---").filter(s=>s.trim()).map((section,i)=>{
+                const lines = section.trim().split("\n");
+                const heading = lines[0].trim();
+                const body = lines.slice(1).join("\n").trim();
+                return (
+                  <div key={i} style={{marginBottom:16}}>
+                    <div style={{fontSize:10,fontWeight:900,color:"#818cf8",letterSpacing:1,marginBottom:6,textTransform:"uppercase"}}>{heading}</div>
+                    <div style={{color:"#e2e8f0",fontSize:12,lineHeight:1.75}}>{body}</div>
                   </div>
+                );
+              })}
+            </div>
+          )}
 
-                  {/* AI ANALYSIS ROW (collapsed by default, expands after analysis) */}
-                  {!pos.dead && (
-                    <div style={{borderTop:"1px solid #1a2540",padding:"8px 14px",background:"#080c18",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-                      {showAI && a ? (
-                        <div style={{flex:1}}>
-                          <div style={{fontSize:11,color:"#cbd5e1",lineHeight:1.6,marginBottom:4}}>{a.reasoning}</div>
-                          <div style={{fontSize:10,color:"#64748b"}}>{a.taxNote}</div>
-                          {a.priceTarget && <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Target: ${a.priceTarget}</div>}
-                          <button onClick={()=>setExpandedAnalysis(null)} style={{marginTop:6,background:"none",border:"none",color:"#475569",fontSize:10,cursor:"pointer"}}>▲ collapse</button>
-                        </div>
-                      ) : a ? (
-                        <button onClick={()=>setExpandedAnalysis(pos.symbol)} style={{background:"none",border:"none",color:"#475569",fontSize:10,cursor:"pointer",textAlign:"left"}}>
-                          ▼ AI: {a.verdict} · {a.confidence}% confidence · tap to expand
-                        </button>
-                      ) : (
-                        <button onClick={()=>analyzePosition(pos)} disabled={aLoading[pos.symbol]}
-                          style={{background:"none",border:"none",color:aLoading[pos.symbol]?"#374151":"#3b82f6",fontSize:11,cursor:"pointer",padding:0}}>
-                          {aLoading[pos.symbol]?`Analyzing ${pos.symbol}…`:"⚡ Get AI verdict"}
-                        </button>
-                      )}
-                      {a && <span style={{fontSize:9,color:VERDICT_COLOR[a.verdict]||"#94a3b8",fontWeight:800}}>{a.verdict} {a.confidence}%</span>}
-                    </div>
-                  )}
+          {!brief && (
+            <div style={{color:"#334155",fontSize:12,textAlign:"center",padding:"20px 0"}}>
+              Tap the button above to get your personalized strategy brief with current market data.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── POSITIONS TAB ── */}
+      {tab==="positions" && (
+        <div style={{padding:"12px 16px 0"}}>
+          {sections.map(sec=>{
+            const positions = PORTFOLIO.filter(p=>sec.phases.includes(p.phase));
+            return (
+              <div key={sec.label} style={{marginBottom:4}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,marginTop:16}}>
+                  <span style={{fontSize:12,fontWeight:800,color:"#94a3b8"}}>{sec.label}</span>
+                  <span style={{fontSize:10,color:"#334155"}}>— {sec.desc}</span>
+                  <div style={{flex:1,height:1,background:"#1e293b"}}/>
+                  <span style={{fontSize:9,color:"#334155"}}>{positions.length}</span>
+                </div>
+                {positions.map(pos=><ActionCard key={pos.symbol} pos={pos}/>)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── TAX TAB ── */}
+      {tab==="tax" && (
+        <div style={{padding:"14px 16px 0"}}>
+          <div style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:9,padding:"14px",marginBottom:10}}>
+            <div style={{fontSize:10,color:"#f97316",fontWeight:800,letterSpacing:1,marginBottom:10}}>SEQUENCING GUIDE</div>
+            {[
+              {step:"1",title:"Write off bankrupt positions",detail:"MMATQ, VEVMQ, CARM, SESEN, BAIYU, WAGP — contact Schwab secure message center. Immediate tax losses with no market risk.",color:"#6b7280"},
+              {step:"2",title:"Sell near-dead positions",detail:"BTCWF, SEEK, SSTY, MBIO — sell in app now. Capture remaining losses before they evaporate.",color:"#ef4444"},
+              {step:"3",title:"Harvest meaningful losses",detail:"LCID, UP, ACHR, STI, S — sell these to lock in losses. These offset your big winners.",color:"#f97316"},
+              {step:"4",title:"Trim winners using offset",detail:"RGTI, BDRBF, OSS, DRUG, USO — now sell partial positions. Your harvested losses absorb the capital gains tax.",color:"#f59e0b"},
+              {step:"5",title:"Let core positions compound",detail:"AAPL, MSFT, NVDA, SCHD, VICI, VZ, etc. — hold. These are your long-term wealth builders.",color:"#22c55e"},
+            ].map(s=>(
+              <div key={s.step} style={{display:"flex",gap:12,marginBottom:14}}>
+                <div style={{width:24,height:24,borderRadius:"50%",background:s.color+"22",border:`1px solid ${s.color}44`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  <span style={{fontSize:10,fontWeight:900,color:s.color}}>{s.step}</span>
+                </div>
+                <div>
+                  <div style={{fontSize:12,fontWeight:800,color:"#f8fafc",marginBottom:3}}>{s.title}</div>
+                  <div style={{fontSize:11,color:"#64748b",lineHeight:1.5}}>{s.detail}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{background:"#1a0f00",border:"1px solid #431407",borderRadius:9,padding:"12px 14px",marginBottom:10}}>
+            <div style={{fontSize:10,color:"#f97316",fontWeight:800,letterSpacing:1,marginBottom:8}}>⚠️ WASH SALE RULE</div>
+            <div style={{fontSize:12,color:"#fed7aa",lineHeight:1.7}}>
+              After selling any position for a tax loss, you <span style={{fontWeight:800,color:"#fb923c"}}>cannot repurchase the same or substantially identical security for 31 days</span> or the loss is disallowed. Plan your redeployment into ETFs or different tickers.
+            </div>
+          </div>
+
+          <div style={{background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:9,padding:"12px 14px"}}>
+            <div style={{fontSize:10,color:"#60a5fa",fontWeight:800,letterSpacing:1,marginBottom:8}}>📊 TAX LOSS SUMMARY</div>
+            {PORTFOLIO.filter(p=>p.phase<=3).map(pos=>{
+              const g=gl(pos);
+              const loss = pos.dead?pos.costBasis*pos.qty:(g&&g.gl<0?Math.abs(g.gl):null);
+              if(!loss&&!pos.dead) return null;
+              return(
+                <div key={pos.symbol} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #0f172a"}}>
+                  <div>
+                    <span style={{fontSize:12,fontWeight:700,color:"#f8fafc"}}>{pos.symbol}</span>
+                    <span style={{fontSize:10,color:"#475569",marginLeft:6}}>{PHASE[pos.phase].action}</span>
+                  </div>
+                  <span style={{fontSize:12,fontWeight:700,color:"#f97316"}}>{loss?`-${fmt(loss,0)}`:"OTC – check Schwab"}</span>
                 </div>
               );
             })}
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:10,paddingTop:8,borderTop:"1px solid #1e293b"}}>
+              <span style={{fontSize:12,fontWeight:800,color:"#f8fafc"}}>Total harvestable</span>
+              <span style={{fontSize:14,fontWeight:900,color:"#f97316"}}>{fmt(harvestable,0)}</span>
+            </div>
           </div>
-        );
-      })}
+        </div>
+      )}
     </div>
   );
 }
