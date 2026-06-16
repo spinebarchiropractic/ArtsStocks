@@ -118,7 +118,7 @@ export default function App() {
       return `${p.symbol} (${PHASE[p.phase].action}) cost=$${p.costBasis} qty=${p.qty}${g?` now=$${g.p.toFixed(2)} gl=${sgn(g.gl)}${fmt(Math.abs(g.gl),0)} ${pct(g.pct)}`:p.dead?` WORTHLESS loss=${fmt(loss,0)}`:` no-price loss-est=${fmt(loss,0)}`}`;
     }).join("\n");
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{
+      const res=await fetch("/api/ai",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           model:"claude-sonnet-4-6",max_tokens:1400,
@@ -159,7 +159,7 @@ ${lines}`
     const winnerList = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl>0;}).map(p=>{const g=gl(p);return p.symbol+"(+"+g.pct.toFixed(0)+"%)"}).join(", ");
     const loserList  = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl<0;}).map(p=>p.symbol).join(", ");
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{
+      const res=await fetch("/api/ai",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           model:"claude-sonnet-4-6",max_tokens:1200,
@@ -169,8 +169,18 @@ ${lines}`
       });
       const data=await res.json();
       const txt=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-      const m=txt.match(/\[[\s\S]*\]/);
-      if(m){try{setIdeas(JSON.parse(m[0]));}catch(e){console.error("parse",e);}}
+      // Try to extract JSON array robustly
+      let parsed = null;
+      const m = txt.match(/\[[\s\S]*?\}\s*\]/);
+      if(m){ try{ parsed = JSON.parse(m[0]); }catch(_){} }
+      if(!parsed){
+        // Try finding array between first [ and last ]
+        const start = txt.indexOf('[');
+        const end = txt.lastIndexOf(']');
+        if(start>-1&&end>start){ try{ parsed=JSON.parse(txt.slice(start,end+1)); }catch(_){} }
+      }
+      if(parsed) setIdeas(parsed);
+      else console.error("Could not parse ideas JSON:", txt.substring(0,200));
     }catch(e){console.error(e);}
     setIdeasLoading(false);
   };
@@ -180,7 +190,7 @@ ${lines}`
     setPosLoading(p=>({...p,[pos.symbol]:true}));
     const g=gl(pos);
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{
+      const res=await fetch("/api/ai",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           model:"claude-sonnet-4-6",max_tokens:500,
