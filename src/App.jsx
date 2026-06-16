@@ -65,6 +65,8 @@ export default function App() {
   const [posInsight, setPosInsight]   = useState({});
   const [posLoading, setPosLoading]   = useState({});
   const [open, setOpen]               = useState(null);
+  const [ideas, setIdeas]             = useState(null);
+  const [ideasLoading, setIdeasLoading] = useState(false);
   const ref = useRef({});
 
   const price = sym => ref.current[sym] ?? null;
@@ -147,6 +149,30 @@ ${lines}`
       setBrief(data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"");
     }catch(e){console.error(e);}
     setBriefLoading(false);
+  };
+
+
+  // ── STOCK IDEAS ──────────────────────────────────────────────────────────
+  const runIdeas = async () => {
+    setIdeasLoading(true);
+    const held = PORTFOLIO.map(p=>p.symbol).join(", ");
+    const winnerList = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl>0;}).map(p=>{const g=gl(p);return p.symbol+"(+"+g.pct.toFixed(0)+"%)"}).join(", ");
+    const loserList  = PORTFOLIO.filter(p=>{const g=gl(p);return g&&g.gl<0;}).map(p=>p.symbol).join(", ");
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-6",max_tokens:1200,
+          tools:[{type:"web_search_20250305",name:"web_search"}],
+          messages:[{role:"user",content:"You are a stock research analyst. Search current market conditions, recent earnings, and momentum plays for June 2026. This investor holds: "+held+". Current winners: "+winnerList+". Current losers being harvested: "+loserList+". Portfolio value ~$14,200. Has harvestable losses to offset gains. Risk tolerance: mix of core holds and occasional speculative bets $200-500 range. Find 3 specific stock opportunities RIGHT NOW. At least 1 speculative, 1 value/growth, 1 ETF or stable. Do NOT suggest anything already held. Return ONLY a raw JSON array no markdown: [{ticker,name,type,conviction,entryZone,target,thesis,whyNow,risk,taxNote}]"}]
+        })
+      });
+      const data=await res.json();
+      const txt=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
+      const m=txt.match(/\[[\s\S]*\]/);
+      if(m){try{setIdeas(JSON.parse(m[0]));}catch(e){console.error("parse",e);}}
+    }catch(e){console.error(e);}
+    setIdeasLoading(false);
   };
 
   // ── PER-POSITION INSIGHT ─────────────────────────────────────────────────
@@ -319,7 +345,7 @@ Search latest news + analyst price targets. Return ONLY raw JSON, no markdown:
 
       {/* ── TABS ── */}
       <div style={{display:"flex",borderBottom:"1px solid #1e293b",background:"#0a0f1e",position:"sticky",top:87,zIndex:9}}>
-        {[["strategy","🎯 Strategy"],["positions","📋 Positions"],["tax","💰 Tax Plan"]].map(([id,label])=>(
+        {[["strategy","🎯 Strategy"],["positions","📋 Positions"],["tax","💰 Tax Plan"],["ideas","💡 Ideas"]].map(([id,label])=>(
           <button key={id} onClick={()=>setTab(id)}
             style={{flex:1,padding:"10px 4px",background:tab===id?"#1e293b":"transparent",color:tab===id?"#f8fafc":"#475569",border:"none",borderBottom:tab===id?"2px solid #6d28d9":"2px solid transparent",fontSize:12,fontWeight:700,cursor:"pointer"}}>
             {label}
@@ -401,6 +427,77 @@ Search latest news + analyst price targets. Return ONLY raw JSON, no markdown:
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ── IDEAS TAB ── */}
+      {tab==="ideas" && (
+        <div style={{padding:"14px 16px 0"}}>
+          <div style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:9,padding:"14px",marginBottom:12}}>
+            <div style={{fontSize:10,color:"#818cf8",fontWeight:800,letterSpacing:1,marginBottom:6}}>HOW THIS WORKS</div>
+            <div style={{fontSize:12,color:"#94a3b8",lineHeight:1.7}}>
+              Based on your current portfolio, tax situation, and live market conditions — get 1-3 specific stock ideas worth considering. Each suggestion accounts for what you already hold, your harvestable losses, and your preference for occasional speculative bets.
+            </div>
+          </div>
+
+          <button onClick={runIdeas} disabled={ideasLoading}
+            style={{width:"100%",background:ideasLoading?"#1e293b":"linear-gradient(90deg,#1d4ed8,#6d28d9)",color:"#fff",border:"none",borderRadius:9,padding:"13px",fontSize:14,fontWeight:900,cursor:"pointer",marginBottom:12}}>
+            {ideasLoading?"⟳ Scanning market conditions…":"🔍 Find Opportunities Now"}
+          </button>
+
+          {ideas && (
+            <div>
+              {ideas.map((idea, i) => (
+                <div key={i} style={{background:"#0a0f1e",border:`1px solid ${idea.type==="speculative"?"#6d28d9":idea.type==="value"?"#0369a1":"#065f46"}`,borderRadius:10,marginBottom:10,overflow:"hidden"}}>
+                  <div style={{padding:"12px 14px",borderBottom:"1px solid #1e293b"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                      <div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                          <span style={{fontSize:18,fontWeight:900,color:"#f8fafc"}}>{idea.ticker}</span>
+                          <span style={{background:idea.type==="speculative"?"#4c1d9522":idea.type==="value"?"#07307022":"#05301622",color:idea.type==="speculative"?"#a78bfa":idea.type==="value"?"#60a5fa":"#34d399",border:`1px solid ${idea.type==="speculative"?"#6d28d944":idea.type==="value"?"#1d4ed844":"#15803d44"}`,borderRadius:4,fontSize:9,fontWeight:800,padding:"2px 7px",textTransform:"uppercase"}}>
+                            {idea.type}
+                          </span>
+                          <span style={{fontSize:9,color:"#475569"}}>Conviction: {idea.conviction}%</span>
+                        </div>
+                        <div style={{fontSize:11,color:"#64748b"}}>{idea.name}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        {idea.entryZone && <div style={{fontSize:13,fontWeight:800,color:"#f8fafc"}}>{idea.entryZone}</div>}
+                        {idea.target && <div style={{fontSize:11,color:"#22c55e"}}>Target: {idea.target}</div>}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{padding:"12px 14px"}}>
+                    <div style={{fontSize:12,color:"#cbd5e1",lineHeight:1.7,marginBottom:10}}>{idea.thesis}</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+                      <div style={{background:"#0f172a",borderRadius:6,padding:"8px 10px"}}>
+                        <div style={{fontSize:8,color:"#065f46",marginBottom:3,letterSpacing:0.5}}>WHY NOW</div>
+                        <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.4}}>{idea.whyNow}</div>
+                      </div>
+                      <div style={{background:"#0f172a",borderRadius:6,padding:"8px 10px"}}>
+                        <div style={{fontSize:8,color:"#7f1d1d",marginBottom:3,letterSpacing:0.5}}>MAIN RISK</div>
+                        <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.4}}>{idea.risk}</div>
+                      </div>
+                    </div>
+                    {idea.taxNote && (
+                      <div style={{marginTop:8,background:"#0f1a0a",border:"1px solid #14532d",borderRadius:6,padding:"7px 10px",fontSize:11,color:"#4ade80"}}>
+                        💰 {idea.taxNote}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div style={{fontSize:10,color:"#334155",textAlign:"center",padding:"8px 0"}}>
+                These are AI-generated ideas, not financial advice. Always verify before acting.
+              </div>
+            </div>
+          )}
+
+          {!ideas && !ideasLoading && (
+            <div style={{color:"#334155",fontSize:12,textAlign:"center",padding:"30px 0",lineHeight:1.8}}>
+              Tap the button above to scan current market conditions and get personalized stock ideas filtered against your existing positions and tax situation.
+            </div>
+          )}
         </div>
       )}
 
