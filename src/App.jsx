@@ -93,7 +93,8 @@ export default function App() {
   useEffect(()=>{ const t=setInterval(()=>setCountdown(c=>c>0?c-1:0),1000); return()=>clearInterval(t); },[]);
 
   // ── TOTALS ──────────────────────────────────────────────────────────────
-  const totalValue    = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.cv:0);},0);
+  const SNAP={BDRBF:3028.20,AAPL:1540.86,MSFT:1240.20,VZ:1252.85,VICI:562.81,SCHD:851.57,USO:799.27,RGTI:530.38,SOFI:441.00,NEM:385.14,NVDA:418.77,OSS:993.00,DRUG:291.25,JETS:313.21,CCL:306.75,CRON:129.75,KORE:137.78,SPCB:121.90,B:429.75,S:225.70,ACHR:108.70,STI:40.95,LCID:5.05,UP:8.00,CYCU:23.97,MBIO:3.49,BTCWF:12.51};
+  const totalValue    = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.cv:(SNAP[p.symbol]||0));},0);
   const totalGL       = PORTFOLIO.reduce((a,p)=>{const g=gl(p);return a+(g?g.gl:0);},0);
   const harvestable   = PORTFOLIO.filter(p=>p.phase<=3).reduce((a,p)=>{
     const g=gl(p);
