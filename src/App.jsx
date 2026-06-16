@@ -40,21 +40,20 @@ const PORTFOLIO = [
   { symbol:"CYCU",  name:"Cycurion Inc",              qty:34,      costBasis:0.88,   phase:0, dead:false },
 ];
 
-const MANUAL_ONLY = new Set(["SEEK","SSTY","BTCWF","WAGP","SESEN","BAIYU","MMATQ","VEVMQ","CARM","CYCU","MBIO","BDRBF","OSS","DRUG","STI","KORE","SPCB","UP"]);
-const PHASE_LABELS = { 0:"Speculative",1:"Worthless",2:"Near-Dead",3:"Loss Harvest",4:"Trim Winner",5:"Core Keep" };
-const PHASE_COLORS = { 0:"#f59e0b",1:"#6b7280",2:"#ef4444",3:"#fb7185",4:"#34d399",5:"#60a5fa" };
-const VERDICT_COLOR = { SELL:"#ef4444",TRIM:"#f97316",HOLD:"#34d399","WRITE-OFF":"#6b7280" };
+// Default verdicts based on phase — overridden by AI analysis if run
+const DEFAULT_VERDICT = { 0:"SPECULATIVE", 1:"WRITE OFF", 2:"SELL", 3:"SELL", 4:"TRIM", 5:"HOLD" };
+const VERDICT_COLOR   = { "HOLD":"#22c55e", "TRIM":"#f59e0b", "SELL":"#ef4444", "WRITE OFF":"#6b7280", "SPECULATIVE":"#a855f7", "WRITE-OFF":"#6b7280" };
+const PHASE_LABELS    = { 0:"Speculative", 1:"Write Off", 2:"Sell Now", 3:"Harvest Loss", 4:"Trim", 5:"Hold" };
 
-const f2  = n => n == null ? "—" : Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-const f0  = n => n == null ? "—" : Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:0,maximumFractionDigits:0});
-const sgn = n => n >= 0 ? "+" : "-";
+const MANUAL_ONLY = new Set(["SEEK","SSTY","BTCWF","WAGP","SESEN","BAIYU","MMATQ","VEVMQ","CARM","CYCU","MBIO","BDRBF","OSS","DRUG","STI","KORE","SPCB","UP"]);
+
+const usd  = (n, dec=2) => n == null ? "—" : "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:dec,maximumFractionDigits:dec});
+const pct  = (n) => n == null ? "—" : (n>=0?"+":"-") + Math.abs(n).toFixed(1) + "%";
+const sgn  = (n) => n >= 0 ? "+" : "-";
 
 export default function App() {
   const [prices, setPrices]             = useState({});
-  const [prevPrices, setPrevPrices]     = useState({});
   const [manualPrices, setManualPrices] = useState({});
-  const [loadedCount, setLoadedCount]   = useState(0);
-  const [failedSyms, setFailedSyms]     = useState(new Set());
   const [analysis, setAnalysis]         = useState({});
   const [aLoading, setALoading]         = useState({});
   const [portAnalysis, setPortAnalysis] = useState(null);
@@ -63,10 +62,9 @@ export default function App() {
   const [lastUpdated, setLastUpdated]   = useState(null);
   const [countdown, setCountdown]       = useState(REFRESH_INTERVAL);
   const [filter, setFilter]             = useState("all");
-  const [sortBy, setSortBy]             = useState("phase");
-  const [expanded, setExpanded]         = useState(null);
-  const [editing, setEditing]           = useState(null);
+  const [editingPrice, setEditingPrice] = useState(null);
   const [editVal, setEditVal]           = useState("");
+  const [expandedAnalysis, setExpandedAnalysis] = useState(null);
   const pricesRef = useRef({});
 
   const getPrice = sym => manualPrices[sym] ?? pricesRef.current[sym] ?? null;
@@ -75,68 +73,51 @@ export default function App() {
     const p = getPrice(pos.symbol);
     if (p == null) return null;
     const cv = p * pos.qty, cb = pos.costBasis * pos.qty;
-    return { gl:cv-cb, pct:((p-pos.costBasis)/pos.costBasis)*100, currentValue:cv };
+    return { price:p, gl:cv-cb, pct:((p-pos.costBasis)/pos.costBasis)*100, currentValue:cv, costValue:cb };
   };
 
   const doFetch = async () => {
     setFetching(true);
     const targets = PORTFOLIO.filter(p => !p.dead && !MANUAL_ONLY.has(p.symbol)).map(p => p.symbol);
     const newPrices = {};
-    const failed = new Set();
-
     await Promise.allSettled(targets.map(async sym => {
       try {
-        // Calls our own /api/quote serverless function — no CORS issues
         const r = await fetch(`/api/quote?symbol=${sym}`);
         const d = await r.json();
         if (d.price && d.price > 0) newPrices[sym] = d.price;
-        else failed.add(sym);
-      } catch { failed.add(sym); }
+      } catch {}
     }));
-
-    setPrevPrices({...pricesRef.current});
-    pricesRef.current = {...pricesRef.current, ...newPrices};
-    setPrices({...pricesRef.current});
-    setLoadedCount(Object.keys(newPrices).length);
-    setFailedSyms(failed);
+    pricesRef.current = { ...pricesRef.current, ...newPrices };
+    setPrices({ ...pricesRef.current });
     setLastUpdated(new Date().toLocaleTimeString());
     setCountdown(REFRESH_INTERVAL);
     setFetching(false);
   };
 
-  useEffect(() => {
-    doFetch();
-    const iv = setInterval(doFetch, REFRESH_INTERVAL * 1000);
-    return () => clearInterval(iv);
-  }, []);
-
-  useEffect(() => {
-    const t = setInterval(() => setCountdown(c => c > 0 ? c-1 : 0), 1000);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(() => { doFetch(); const iv = setInterval(doFetch, REFRESH_INTERVAL*1000); return ()=>clearInterval(iv); }, []);
+  useEffect(() => { const t = setInterval(()=>setCountdown(c=>c>0?c-1:0),1000); return ()=>clearInterval(t); }, []);
 
   const analyzePosition = async pos => {
     setALoading(p=>({...p,[pos.symbol]:true}));
-    const price = getPrice(pos.symbol);
-    const glData = getGL(pos);
+    const gl = getGL(pos);
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:1000,
+          model:"claude-sonnet-4-6", max_tokens:800,
           tools:[{type:"web_search_20250305",name:"web_search"}],
           messages:[{role:"user",content:
-            `Ruthless analyst. TAXABLE Schwab account, cleanup 35→15 positions. Analyze ${pos.symbol} (${pos.name}).
-Cost: $${pos.costBasis}/sh | Qty: ${pos.qty} | Price: $${price??"unknown"} | G/L: ${glData?`$${glData.gl.toFixed(2)} (${glData.pct.toFixed(1)}%)`:"N/A"} | Phase: ${PHASE_LABELS[pos.phase]}
-Search news + analyst targets. Return ONLY raw JSON (no markdown):
-{"verdict":"SELL","confidence":75,"priceTarget":null,"catalyst":"one line","taxNote":"one line","reasoning":"2-3 sentences"}`
+            `Analyze ${pos.symbol} (${pos.name}) for a taxable Schwab account doing a 35→15 position cleanup.
+Cost: $${pos.costBasis}/sh | Qty: ${pos.qty} | Price: $${gl?.price??"unknown"} | G/L: ${gl?`${sgn(gl.gl)}$${Math.abs(gl.gl).toFixed(0)} (${gl.pct.toFixed(1)}%)`:"N/A"} | Action: ${PHASE_LABELS[pos.phase]}
+Search latest news and analyst targets. Return ONLY raw JSON:
+{"verdict":"SELL","confidence":80,"priceTarget":null,"reasoning":"2 sentences max","taxNote":"wash sale or tax note"}`
           }]
         })
       });
       const data = await res.json();
       const txt = data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
       const m = txt.match(/\{[\s\S]*?"reasoning"[\s\S]*?\}/);
-      if (m) { try { setAnalysis(p=>({...p,[pos.symbol]:JSON.parse(m[0])})); } catch(_){} }
+      if (m) { try { setAnalysis(p=>({...p,[pos.symbol]:JSON.parse(m[0])})); setExpandedAnalysis(pos.symbol); } catch(_){} }
     } catch(e){ console.error(e); }
     setALoading(p=>({...p,[pos.symbol]:false}));
   };
@@ -145,16 +126,16 @@ Search news + analyst targets. Return ONLY raw JSON (no markdown):
     setPortLoading(true);
     const summary = PORTFOLIO.map(p => {
       const g = getGL(p);
-      return `${p.symbol} phase=${p.phase} qty=${p.qty} cost=$${p.costBasis} gl=${g?`${sgn(g.gl)}$${f0(g.gl)}`:"dead/unknown"}`;
+      return `${p.symbol} action=${PHASE_LABELS[p.phase]} cost=$${p.costBasis} gl=${g?`${sgn(g.gl)}$${Math.abs(g.gl).toFixed(0)}`:"dead"}`;
     }).join("\n");
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:1000,
+          model:"claude-sonnet-4-6", max_tokens:800,
           tools:[{type:"web_search_20250305",name:"web_search"}],
           messages:[{role:"user",content:
-            `Ruthless portfolio strategist. Taxable Schwab, cleanup 35→15 positions, June 2026. Search current market conditions. 3-4 sentence strategic brief on priorities THIS WEEK. No hedging. End with single most important action.\n\n${summary}`
+            `Taxable Schwab account, cleanup 35→15 positions, June 2026. Search market conditions. Give 3 sentence brief on what to do THIS WEEK. Be direct. End with the single most important action.\n\n${summary}`
           }]
         })
       });
@@ -164,206 +145,197 @@ Search news + analyst targets. Return ONLY raw JSON (no markdown):
     setPortLoading(false);
   };
 
-  const SNAP = {BDRBF:3028.20,AAPL:1540.86,MSFT:1240.20,VZ:1252.85,VICI:562.81,SCHD:851.57,USO:799.27,RGTI:530.38,SOFI:441.00,NEM:385.14,NVDA:418.77,OSS:993.00,DRUG:291.25,JETS:313.21,CCL:306.75,CRON:129.75,KORE:137.78,SPCB:121.90,B:429.75,S:225.70,ACHR:108.70,STI:40.95,LCID:5.05,UP:8.00,CYCU:23.97,MBIO:3.49,BTCWF:12.51};
+  const SNAP = {BDRBF:216.00,AAPL:1540.86,MSFT:1240.20,VZ:1252.85,VICI:562.81,SCHD:851.57,USO:799.27,RGTI:530.38,SOFI:441.00,NEM:385.14,NVDA:418.77,OSS:993.00,DRUG:291.25,JETS:313.21,CCL:306.75,CRON:129.75,KORE:137.78,SPCB:121.90,B:429.75,S:225.70,ACHR:108.70,STI:40.95,LCID:5.05,UP:8.00,CYCU:23.97,MBIO:3.49,BTCWF:12.51};
   const totalValue = PORTFOLIO.reduce((a,p)=>{const g=getGL(p);return a+(g?g.currentValue:(SNAP[p.symbol]||0));},0);
   const totalGL    = PORTFOLIO.reduce((a,p)=>{const g=getGL(p);return a+(g?g.gl:0);},0);
+  const liveCount  = Object.keys(pricesRef.current).length;
 
-  const filtered = PORTFOLIO.filter(p=>{
-    if(filter==="all")      return true;
-    if(filter==="losers")   {const g=getGL(p);return g&&g.gl<0;}
-    if(filter==="winners")  {const g=getGL(p);return g&&g.gl>0;}
-    if(filter==="dead")     return p.dead||p.phase<=2;
-    if(filter==="analyzed") return !!analysis[p.symbol];
-    return true;
-  });
-  const sorted = [...filtered].sort((a,b)=>{
-    if(sortBy==="phase")  return a.phase-b.phase;
-    if(sortBy==="gl$")    {const ga=getGL(a),gb=getGL(b);return (ga?.gl||0)-(gb?.gl||0);}
-    if(sortBy==="gl%")    {const ga=getGL(a),gb=getGL(b);return (ga?.pct||0)-(gb?.pct||0);}
-    if(sortBy==="value")  {const ga=getGL(a),gb=getGL(b);return (gb?.currentValue||0)-(ga?.currentValue||0);}
-    return 0;
-  });
+  const groups = [
+    { label:"🔴 Sell / Write Off", phases:[1,2,3], color:"#ef4444" },
+    { label:"🟡 Trim", phases:[4], color:"#f59e0b" },
+    { label:"🟢 Hold", phases:[5], color:"#22c55e" },
+    { label:"⚡ Speculative", phases:[0], color:"#a855f7" },
+  ];
 
-  const flash = sym=>{const c=prices[sym],p=prevPrices[sym];if(!c||!p||c===p)return{};return{color:c>p?"#34d399":"#ef4444"};};
-  const Btn=({active,onClick,children,ac="#1d4ed8"})=>(
-    <button onClick={onClick} style={{background:active?ac:"#1e293b",color:active?"#fff":"#64748b",border:"none",borderRadius:5,padding:"4px 10px",fontSize:11,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-      {children}
-    </button>
-  );
+  const visiblePositions = filter === "all"
+    ? PORTFOLIO
+    : filter === "losers"  ? PORTFOLIO.filter(p=>{const g=getGL(p);return g&&g.gl<0;})
+    : filter === "winners" ? PORTFOLIO.filter(p=>{const g=getGL(p);return g&&g.gl>0;})
+    : PORTFOLIO;
+
+  const verdict = pos => {
+    const a = analysis[pos.symbol];
+    return a?.verdict || DEFAULT_VERDICT[pos.phase] || "HOLD";
+  };
 
   return (
-    <div style={{background:"#060a14",minHeight:"100vh",color:"#e2e8f0",fontFamily:"'Inter',system-ui,sans-serif",maxWidth:500,margin:"0 auto"}}>
+    <div style={{background:"#0a0f1e",minHeight:"100vh",color:"#e2e8f0",fontFamily:"'Inter',system-ui,sans-serif",maxWidth:540,margin:"0 auto",paddingBottom:40}}>
 
       {/* HEADER */}
-      <div style={{background:"linear-gradient(160deg,#0f172a,#1a1040)",padding:"18px 16px 14px",borderBottom:"1px solid #1e293b",position:"sticky",top:0,zIndex:10}}>
+      <div style={{background:"linear-gradient(160deg,#0f172a,#1a1040)",padding:"16px 16px 14px",borderBottom:"1px solid #1e293b",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
           <div>
-            <div style={{fontSize:10,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Schwab · Taxable · Individual</div>
-            <div style={{fontSize:20,fontWeight:900,color:"#f8fafc",letterSpacing:-0.5}}>Portfolio Command</div>
+            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Schwab · Taxable · Individual</div>
+            <div style={{fontSize:19,fontWeight:900,color:"#f8fafc",letterSpacing:-0.5}}>Portfolio Command</div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:10,color:fetching?"#f59e0b":"#34d399",marginBottom:3}}>
-              {fetching?"● Fetching...":`● Live · ${countdown}s`}
-            </div>
+            <div style={{fontSize:10,color:fetching?"#f59e0b":"#34d399",marginBottom:3}}>{fetching?"● Updating...": `● Live · ${countdown}s`}</div>
             <button onClick={doFetch} disabled={fetching}
-              style={{background:"#1e293b",color:fetching?"#374151":"#94a3b8",border:"1px solid #334155",borderRadius:6,padding:"4px 12px",fontSize:11,cursor:fetching?"default":"pointer"}}>
-              ↻ Refresh Now
+              style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:6,padding:"4px 12px",fontSize:11,cursor:"pointer"}}>
+              ↻ Refresh
             </button>
           </div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+
+        {/* Stats */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:8}}>
           {[
-            {label:"Portfolio Value",val:`$${f0(totalValue)}`,color:"#f8fafc"},
-            {label:"Unrealized G/L", val:`${sgn(totalGL)}$${f0(Math.abs(totalGL))}`,color:totalGL>=0?"#34d399":"#ef4444"},
-            {label:"Positions",      val:`${PORTFOLIO.length} → 15`,color:"#94a3b8"},
+            {label:"Total Value",    val:usd(totalValue,0),                                      color:"#f8fafc"},
+            {label:"Total P&L",      val:`${sgn(totalGL)}${usd(Math.abs(totalGL),0)}`,           color:totalGL>=0?"#22c55e":"#ef4444"},
+            {label:"Positions",      val:`${PORTFOLIO.length} → 15`,                             color:"#94a3b8"},
           ].map(s=>(
             <div key={s.label} style={{background:"#0f172a",borderRadius:7,padding:"8px 10px",border:"1px solid #1e293b"}}>
-              <div style={{fontSize:9,color:"#475569",marginBottom:3,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
-              <div style={{fontSize:14,fontWeight:800,color:s.color}}>{s.val}</div>
+              <div style={{fontSize:9,color:"#475569",marginBottom:2,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+              <div style={{fontSize:13,fontWeight:800,color:s.color}}>{s.val}</div>
             </div>
           ))}
         </div>
-        {lastUpdated&&<div style={{fontSize:9,color:"#334155",marginTop:6}}>Updated: {lastUpdated} · Auto-refreshes every 60s · {loadedCount} live · {failedSyms.size} manual</div>}
+        {lastUpdated&&<div style={{fontSize:9,color:"#334155"}}>Updated {lastUpdated} · {liveCount} live prices · manual entry available per position</div>}
       </div>
 
-      {/* STRATEGY */}
+      {/* STRATEGY BRIEF */}
       <div style={{padding:"12px 16px 0"}}>
         <button onClick={runPortfolioAnalysis} disabled={portLoading}
-          style={{width:"100%",background:portLoading?"#1e293b":"linear-gradient(90deg,#6d28d9,#4338ca)",color:"#fff",border:"none",borderRadius:8,padding:"11px",fontSize:13,fontWeight:800,cursor:portLoading?"default":"pointer"}}>
-          {portLoading?"⟳ Analyzing portfolio...":"⚡ Run Portfolio Strategy Brief"}
+          style={{width:"100%",background:portLoading?"#1e293b":"linear-gradient(90deg,#6d28d9,#4338ca)",color:"#fff",border:"none",borderRadius:8,padding:"10px",fontSize:13,fontWeight:800,cursor:"pointer"}}>
+          {portLoading?"⟳ Analyzing...":"⚡ This Week's Strategy Brief"}
         </button>
         {portAnalysis&&(
           <div style={{background:"#160f2e",border:"1px solid #4c1d95",borderRadius:8,padding:14,marginTop:8,fontSize:12,lineHeight:1.75,color:"#c4b5fd"}}>
-            <div style={{fontSize:9,color:"#7c3aed",fontWeight:800,letterSpacing:1,marginBottom:6}}>STRATEGY BRIEF</div>
+            <div style={{fontSize:9,color:"#7c3aed",fontWeight:800,letterSpacing:1,marginBottom:6}}>STRATEGY</div>
             {portAnalysis}
           </div>
         )}
       </div>
 
-      {/* FILTERS */}
-      <div style={{padding:"12px 16px 0"}}>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}}>
-          <Btn active={filter==="all"}      onClick={()=>setFilter("all")}>All</Btn>
-          <Btn active={filter==="losers"}   onClick={()=>setFilter("losers")}>🔴 Losers</Btn>
-          <Btn active={filter==="winners"}  onClick={()=>setFilter("winners")}>🟢 Winners</Btn>
-          <Btn active={filter==="dead"}     onClick={()=>setFilter("dead")}>💀 Dead</Btn>
-          <Btn active={filter==="analyzed"} onClick={()=>setFilter("analyzed")}>✓ Analyzed</Btn>
-        </div>
-        <div style={{display:"flex",gap:5,alignItems:"center"}}>
-          <span style={{fontSize:9,color:"#475569",marginRight:2}}>SORT</span>
-          <Btn active={sortBy==="phase"} onClick={()=>setSortBy("phase")} ac="#0f766e">Phase</Btn>
-          <Btn active={sortBy==="gl$"}   onClick={()=>setSortBy("gl$")}   ac="#0f766e">G/L $</Btn>
-          <Btn active={sortBy==="gl%"}   onClick={()=>setSortBy("gl%")}   ac="#0f766e">G/L %</Btn>
-          <Btn active={sortBy==="value"} onClick={()=>setSortBy("value")} ac="#0f766e">Value</Btn>
-        </div>
+      {/* FILTER */}
+      <div style={{padding:"10px 16px 0",display:"flex",gap:6}}>
+        {[["all","All"],["winners","🟢 Winners"],["losers","🔴 Losers"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setFilter(v)}
+            style={{background:filter===v?"#1d4ed8":"#1e293b",color:filter===v?"#fff":"#64748b",border:"none",borderRadius:5,padding:"4px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>
+            {l}
+          </button>
+        ))}
       </div>
 
-      {/* CARDS */}
-      <div style={{padding:"12px 16px 0"}}>
-        {sorted.map(pos=>{
-          const price=getPrice(pos.symbol),glData=getGL(pos),a=analysis[pos.symbol];
-          const open=expanded===pos.symbol,sym=pos.symbol,hasMan=manualPrices[sym]!=null;
-          const isManOnly=MANUAL_ONLY.has(sym)||pos.dead;
+      {/* POSITION GROUPS */}
+      {groups.map(group => {
+        const positions = visiblePositions.filter(p => group.phases.includes(p.phase));
+        if (positions.length === 0) return null;
+        return (
+          <div key={group.label} style={{padding:"14px 16px 0"}}>
+            <div style={{fontSize:11,fontWeight:800,color:group.color,letterSpacing:1,textTransform:"uppercase",marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+              {group.label}
+              <div style={{flex:1,height:1,background:group.color+"33"}}/>
+            </div>
 
-          return(
-            <div key={sym} style={{background:"#0d1424",border:`1px solid ${open?"#3b82f6":"#1a2540"}`,borderRadius:10,marginBottom:7,overflow:"hidden"}}>
-              <div onClick={()=>setExpanded(open?null:sym)} style={{padding:"11px 13px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
-                    <span style={{fontSize:15,fontWeight:900,color:"#f8fafc"}}>{sym}</span>
-                    <span style={{background:PHASE_COLORS[pos.phase]+"22",color:PHASE_COLORS[pos.phase],border:`1px solid ${PHASE_COLORS[pos.phase]}44`,borderRadius:4,fontSize:9,fontWeight:700,padding:"1px 6px"}}>{PHASE_LABELS[pos.phase]}</span>
-                    {a&&<span style={{background:(VERDICT_COLOR[a.verdict]||"#94a3b8")+"22",color:VERDICT_COLOR[a.verdict]||"#94a3b8",border:`1px solid ${VERDICT_COLOR[a.verdict]||"#94a3b8"}44`,borderRadius:4,fontSize:9,fontWeight:800,padding:"1px 6px"}}>{a.verdict}</span>}
-                  </div>
-                  <div style={{fontSize:10,color:"#475569",marginBottom:3}}>{pos.name}</div>
-                  <div style={{fontSize:10,color:"#334155"}}>Qty {pos.qty} · Cost ${pos.costBasis}</div>
-                </div>
-                <div style={{textAlign:"right",minWidth:100,flexShrink:0}}>
-                  {pos.dead?(
-                    <div style={{fontSize:11,color:"#374151",fontWeight:700}}>WORTHLESS</div>
-                  ):price!=null?(
-                    <>
-                      <div style={{fontSize:15,fontWeight:800,...(hasMan?{color:"#f59e0b"}:{color:"#f8fafc",...flash(sym)})}}>${f2(price)}</div>
-                      {glData&&<div style={{fontSize:11,fontWeight:700,color:glData.gl>=0?"#34d399":"#ef4444"}}>{sgn(glData.gl)}${f0(glData.gl)} ({sgn(glData.pct)}{f2(Math.abs(glData.pct))}%)</div>}
-                      {hasMan&&<div style={{fontSize:8,color:"#78716c"}}>manual</div>}
-                    </>
-                  ):(
-                    <div style={{fontSize:10,color:isManOnly?"#4b5563":"#374151"}}>{fetching?"loading…":"tap to set price"}</div>
-                  )}
-                </div>
-              </div>
+            {positions.map(pos => {
+              const gl      = getGL(pos);
+              const v       = verdict(pos);
+              const vColor  = VERDICT_COLOR[v] || "#94a3b8";
+              const a       = analysis[pos.symbol];
+              const showAI  = expandedAnalysis === pos.symbol;
+              const price   = getPrice(pos.symbol);
+              const hasMan  = manualPrices[pos.symbol] != null;
+              const noPrice = !pos.dead && price == null;
 
-              {open&&(
-                <div style={{borderTop:"1px solid #1a2540",padding:"12px 13px",background:"#080c18"}}>
-                  <div style={{marginBottom:12}}>
-                    <div style={{fontSize:9,color:"#475569",marginBottom:5,textTransform:"uppercase",letterSpacing:0.5}}>
-                      {isManOnly?"Enter Current Price":"Manual Price Override"}
+              return (
+                <div key={pos.symbol} style={{background:"#0d1424",border:`1px solid #1a2540`,borderRadius:10,marginBottom:6,overflow:"hidden"}}>
+
+                  {/* MAIN ROW */}
+                  <div style={{padding:"12px 14px",display:"grid",gridTemplateColumns:"auto 1fr auto",gap:12,alignItems:"center"}}>
+
+                    {/* VERDICT badge */}
+                    <div style={{background:vColor+"22",border:`1px solid ${vColor}55`,borderRadius:6,padding:"4px 8px",textAlign:"center",minWidth:62}}>
+                      <div style={{fontSize:9,fontWeight:900,color:vColor,letterSpacing:0.5}}>{v}</div>
                     </div>
-                    {editing===sym?(
-                      <div style={{display:"flex",gap:6}}>
-                        <input value={editVal} onChange={e=>setEditVal(e.target.value)}
-                          onKeyDown={e=>{if(e.key==="Enter"){setManualPrices(p=>({...p,[sym]:parseFloat(editVal)}));setEditing(null);}}}
-                          placeholder="e.g. 1.23" autoFocus
-                          style={{flex:1,background:"#1e293b",border:"1px solid #334155",borderRadius:6,padding:"7px 10px",color:"#f8fafc",fontSize:13}}/>
-                        <button onClick={()=>{setManualPrices(p=>({...p,[sym]:parseFloat(editVal)}));setEditing(null);}}
-                          style={{background:"#1d4ed8",color:"#fff",border:"none",borderRadius:6,padding:"7px 13px",fontSize:12,cursor:"pointer"}}>Set</button>
-                        <button onClick={()=>{const n={...manualPrices};delete n[sym];setManualPrices(n);setEditing(null);}}
-                          style={{background:"#1e293b",color:"#6b7280",border:"none",borderRadius:6,padding:"7px 10px",fontSize:12,cursor:"pointer"}}>Clear</button>
+
+                    {/* Ticker + name + cost */}
+                    <div>
+                      <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                        <span style={{fontSize:15,fontWeight:900,color:"#f8fafc"}}>{pos.symbol}</span>
+                        <span style={{fontSize:10,color:"#475569"}}>{pos.name}</span>
                       </div>
-                    ):(
-                      <button onClick={()=>{setEditing(sym);setEditVal(price?.toString()||"");}}
-                        style={{background:"#1e293b",color:"#64748b",border:"1px solid #334155",borderRadius:6,padding:"6px 12px",fontSize:11,cursor:"pointer"}}>
-                        {hasMan?`$${manualPrices[sym]} · Edit`:"Set price manually"}
-                      </button>
-                    )}
-                  </div>
-                  {a?(
-                    <div style={{background:"#0f172a",borderRadius:8,padding:12,border:`1px solid ${VERDICT_COLOR[a.verdict]||"#334155"}44`}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                        <span style={{fontSize:17,fontWeight:900,color:VERDICT_COLOR[a.verdict]||"#94a3b8"}}>→ {a.verdict}</span>
-                        <div style={{fontSize:11,color:"#64748b",textAlign:"right"}}>
-                          {a.priceTarget&&<div>Target: ${a.priceTarget}</div>}
-                          <div>Confidence: {a.confidence}%</div>
-                        </div>
+                      <div style={{fontSize:10,color:"#475569",marginTop:1}}>
+                        {pos.dead ? (
+                          <span style={{color:"#6b7280"}}>Cost: {usd(pos.costBasis)} × {pos.qty} · Worthless</span>
+                        ) : (
+                          <span>Cost {usd(pos.costBasis)}/sh · {pos.qty} shares · Paid {usd(pos.costBasis * pos.qty, 0)}</span>
+                        )}
                       </div>
-                      <div style={{fontSize:12,color:"#cbd5e1",lineHeight:1.65,marginBottom:10}}>{a.reasoning}</div>
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:8}}>
-                        {[["CATALYST / RISK",a.catalyst],["TAX NOTE",a.taxNote]].map(([lbl,val])=>(
-                          <div key={lbl} style={{background:"#1e293b",borderRadius:6,padding:"7px 9px"}}>
-                            <div style={{fontSize:8,color:"#475569",marginBottom:3,letterSpacing:0.5}}>{lbl}</div>
-                            <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.4}}>{val}</div>
+                    </div>
+
+                    {/* Price + P&L */}
+                    <div style={{textAlign:"right",minWidth:90}}>
+                      {pos.dead ? (
+                        <div style={{fontSize:11,color:"#4b5563",fontWeight:700}}>—</div>
+                      ) : gl ? (
+                        <>
+                          <div style={{fontSize:15,fontWeight:800,color:hasMan?"#f59e0b":"#f8fafc"}}>{usd(gl.price)}</div>
+                          <div style={{fontSize:11,fontWeight:700,color:gl.gl>=0?"#22c55e":"#ef4444"}}>
+                            {sgn(gl.gl)}{usd(Math.abs(gl.gl),0)} ({pct(gl.pct)})
                           </div>
-                        ))}
-                      </div>
-                      <button onClick={()=>analyzePosition(pos)} disabled={aLoading[sym]}
-                        style={{width:"100%",background:"#1e293b",color:"#475569",border:"none",borderRadius:6,padding:"7px",fontSize:11,cursor:"pointer"}}>
-                        {aLoading[sym]?"Re-analyzing…":"↻ Refresh Analysis"}
-                      </button>
+                        </>
+                      ) : noPrice ? (
+                        <div>
+                          {editingPrice===pos.symbol ? (
+                            <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                              <input value={editVal} onChange={e=>setEditVal(e.target.value)}
+                                onKeyDown={e=>{if(e.key==="Enter"){setManualPrices(p=>({...p,[pos.symbol]:parseFloat(editVal)}));setEditingPrice(null);}}}
+                                placeholder="price" autoFocus
+                                style={{width:64,background:"#1e293b",border:"1px solid #334155",borderRadius:5,padding:"4px 6px",color:"#f8fafc",fontSize:12,textAlign:"right"}}/>
+                              <button onClick={()=>{setManualPrices(p=>({...p,[pos.symbol]:parseFloat(editVal)}));setEditingPrice(null);}}
+                                style={{background:"#1d4ed8",color:"#fff",border:"none",borderRadius:5,padding:"4px 7px",fontSize:11,cursor:"pointer"}}>✓</button>
+                            </div>
+                          ) : (
+                            <button onClick={()=>{setEditingPrice(pos.symbol);setEditVal("");}}
+                              style={{background:"#1e293b",color:"#475569",border:"1px dashed #334155",borderRadius:5,padding:"3px 8px",fontSize:10,cursor:"pointer"}}>
+                              + price
+                            </button>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
-                  ):(
-                    <button onClick={()=>analyzePosition(pos)} disabled={aLoading[sym]}
-                      style={{width:"100%",background:aLoading[sym]?"#1e293b":"linear-gradient(90deg,#0f766e,#0369a1)",color:"#fff",border:"none",borderRadius:8,padding:"11px",fontSize:13,fontWeight:800,cursor:aLoading[sym]?"default":"pointer"}}>
-                      {aLoading[sym]?`Analyzing ${sym}…`:`⚡ Analyze ${sym} — Keep or Sell?`}
-                    </button>
+                  </div>
+
+                  {/* AI ANALYSIS ROW (collapsed by default, expands after analysis) */}
+                  {!pos.dead && (
+                    <div style={{borderTop:"1px solid #1a2540",padding:"8px 14px",background:"#080c18",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                      {showAI && a ? (
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:11,color:"#cbd5e1",lineHeight:1.6,marginBottom:4}}>{a.reasoning}</div>
+                          <div style={{fontSize:10,color:"#64748b"}}>{a.taxNote}</div>
+                          {a.priceTarget && <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Target: ${a.priceTarget}</div>}
+                          <button onClick={()=>setExpandedAnalysis(null)} style={{marginTop:6,background:"none",border:"none",color:"#475569",fontSize:10,cursor:"pointer"}}>▲ collapse</button>
+                        </div>
+                      ) : a ? (
+                        <button onClick={()=>setExpandedAnalysis(pos.symbol)} style={{background:"none",border:"none",color:"#475569",fontSize:10,cursor:"pointer",textAlign:"left"}}>
+                          ▼ AI: {a.verdict} · {a.confidence}% confidence · tap to expand
+                        </button>
+                      ) : (
+                        <button onClick={()=>analyzePosition(pos)} disabled={aLoading[pos.symbol]}
+                          style={{background:"none",border:"none",color:aLoading[pos.symbol]?"#374151":"#3b82f6",fontSize:11,cursor:"pointer",padding:0}}>
+                          {aLoading[pos.symbol]?`Analyzing ${pos.symbol}…`:"⚡ Get AI verdict"}
+                        </button>
+                      )}
+                      {a && <span style={{fontSize:9,color:VERDICT_COLOR[a.verdict]||"#94a3b8",fontWeight:800}}>{a.verdict} {a.confidence}%</span>}
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* LEGEND */}
-      <div style={{padding:"16px 16px 48px"}}>
-        <div style={{background:"#0d1424",border:"1px solid #1a2540",borderRadius:8,padding:12}}>
-          <div style={{fontSize:9,color:"#334155",marginBottom:8,letterSpacing:1,textTransform:"uppercase"}}>Cleanup Phases</div>
-          {Object.entries(PHASE_LABELS).map(([p,l])=>(
-            <div key={p} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-              <div style={{width:7,height:7,borderRadius:"50%",background:PHASE_COLORS[p],flexShrink:0}}/>
-              <span style={{fontSize:10,color:"#475569"}}>Phase {p}: {l}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
